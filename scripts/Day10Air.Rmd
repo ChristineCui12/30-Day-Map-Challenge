@@ -1,0 +1,218 @@
+---
+title: "Day10_Air"
+author: "Christine"
+date: "2025-11-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+install.packages(c("geosphere", "rnaturalearth", "rnaturalearthdata"))
+
+# 加载包
+library(tidyverse)    # 数据处理
+library(sf)           # 空间数据处理
+library(leaflet)      # 交互式地图
+library(geosphere)    # 大圆航线计算
+library(rnaturalearth) # 世界地图数据
+library(viridis)      # 颜色方案
+```
+
+```{r}
+# 读取机场数据
+airports <- read_delim("D:/30-Day-Map-Challenge/data/Day10Air/airports.dat", 
+                      delim = ",",
+                      col_names = c("id", "name", "city", "country", 
+                                   "iata", "icao", "lat", "lon", 
+                                   "altitude", "timezone", "dst", 
+                                   "tz", "type", "source"),
+                      na = "\\N")
+
+# 读取航线数据
+routes <- read_delim("D:/30-Day-Map-Challenge/data/Day10Air/routes.dat", 
+                    delim = ",",
+                    col_names = c("airline", "airline_id", "source", 
+                                 "source_id", "dest", "dest_id", 
+                                 "codeshare", "stops", "equipment"),
+                    na = "\\N")
+```
+```{r}
+# 查找纽约JFK机场
+jfk_airport <- airports %>%
+  filter(iata == "JFK" | name %>% str_detect("John F. Kennedy")) %>%
+  slice(1)
+
+# 显示JFK机场信息
+print(jfk_airport %>% select(name, city, country, iata, lat, lon))
+
+# 提取JFK机场ID和坐标
+jfk_id <- jfk_airport$id
+jfk_lat <- jfk_airport$lat
+jfk_lon <- jfk_airport$lon
+```
+```{r}
+# 筛选从JFK出发的航线
+jfk_routes <- routes %>%
+  filter(source_id == jfk_id,    # 从JFK出发
+         stops == 0,             # 直飞航班
+         !is.na(dest_id))        # 有效目的地
+
+# 查看航线概况
+cat("从纽约JFK机场出发的直飞航线数量:", nrow(jfk_routes), "\n")
+print(table(jfk_routes$codeshare))
+```
+```{r}
+# 连接目的地机场信息
+jfk_routes_detailed <- jfk_routes %>%
+  left_join(airports %>% 
+              select(dest_id = id, dest_name = name, 
+                     dest_city = city, dest_country = country,
+                     dest_lat = lat, dest_lon = lon),
+            by = "dest_id") %>%
+  filter(!is.na(dest_lat))  # 移除无效坐标
+# 查看目的地分布
+dest_summary <- jfk_routes_detailed %>%
+  count(dest_country, sort = TRUE)
+print(head(dest_summary, 10))
+```
+```{r}
+# 创建直线航线（使用全部数据）
+routes_sf <- jfk_routes_detailed %>%
+  rowwise() %>%
+  mutate(geometry = list(st_linestring(matrix(c(jfk_lon, jfk_lat, dest_lon, dest_lat), ncol = 2, byrow = TRUE)))) %>%
+  ungroup() %>%
+  st_sf(crs = 4326)
+
+cat("成功创建", nrow(routes_sf), "条从JFK出发的航线（使用完整数据集）\n")
+```
+```{r}
+# 第四步：可视化
+# 1. 静态地图可视化
+# 获取世界地图数据
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# 创建静态地图
+ggplot() +
+  geom_sf(data = world, fill = "gray15", color = "gray30", size = 0.2) +
+  geom_sf(data = routes_sf, 
+          aes(color = codeshare), 
+          size = 0.5, 
+          alpha = 0.6) +
+  # 标记JFK机场
+  geom_point(aes(x = jfk_lon, y = jfk_lat), 
+             color = "red", size = 4, shape = 18) +
+  # 标记目的地机场
+  geom_point(data = jfk_routes_sample, 
+             aes(x = dest_lon, y = dest_lat), 
+             color = "yellow", size = 1, alpha = 0.7) +
+  scale_color_manual(values = c("Y" = "orange", "NA" = "cyan"), 
+                     na.value = "cyan",
+                     labels = c("代码共享", "直飞"),
+                     name = "航班类型") +
+  labs(title = "从纽约肯尼迪国际机场(JFK)出发的直飞航线网络",
+       subtitle = paste("展示", sample_size, "条主要航线"),
+       caption = "数据来源: OpenFlights") +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "black", color = NA),
+    panel.background = element_rect(fill = "black", color = NA),
+    text = element_text(color = "white"),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom"
+  )
+```
+```{r}
+# 2. 交互式地图（Leaflet）
+# 创建交互式地图 - 纽约JFK版本
+leaflet() %>%
+  addProviderTiles(providers$CartoDB.DarkMatter,
+                   options = providerTileOptions(noWrap = TRUE)) %>%
+  # 添加航线
+  addPolylines(
+    data = routes_sf,
+    color = ~ifelse(is.na(codeshare), "#00ffff", "#ffa500"),
+    weight = 1,
+    opacity = 0.6,
+    popup = ~paste(
+      "目的地:", dest_name, "<br>",
+      "城市:", dest_city, "<br>", 
+      "国家:", dest_country, "<br>",
+      "航班类型:", ifelse(is.na(codeshare), "直飞", "代码共享"), "<br>",
+      "机型:", equipment
+    ),
+    highlightOptions = highlightOptions(
+      color = "white", 
+      weight = 3,
+      bringToFront = TRUE
+    )
+  ) %>%
+  # 标记JFK机场
+  addMarkers(
+    lng = jfk_lon, 
+    lat = jfk_lat,
+    popup = paste(
+      "<b>纽约肯尼迪国际机场 (JFK)</b><br>",
+      "城市: New York<br>",
+      "航线数量:", nrow(jfk_routes_detailed)
+    ),
+    icon = makeIcon(
+      iconUrl = "https://cdn-icons-png.flaticon.com/512/684/684908.png",
+      iconWidth = 20, iconHeight = 20
+    )
+  ) %>%
+  # 标记目的地机场
+  addCircleMarkers(
+    data = jfk_routes_sample,
+    lng = ~dest_lon, 
+    lat = ~dest_lat,
+    radius = 3,
+    color = "yellow",
+    fillOpacity = 0.7,
+    stroke = FALSE,
+    popup = ~paste(
+      "<b>", dest_name, "</b><br>",
+      "城市:", dest_city, "<br>",
+      "国家:", dest_country
+    )
+  ) %>%
+  setView(lng = jfk_lon, lat = jfk_lat, zoom = 3) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("#00ffff", "#ffa500"),
+    labels = c("直飞航班", "代码共享航班"),
+    title = "航班类型"
+  )
+```
+```{r}
+# 3. 按大洲分析可视化
+# 按大洲分析航线分布
+routes_sf <- routes_sf %>%
+  mutate(continent = case_when(
+    dest_country %in% c("United States", "Canada", "Mexico") ~ "北美洲",
+    dest_country %in% c("United Kingdom", "Germany", "France", "Spain", "Italy", "Netherlands") ~ "欧洲",
+    dest_country %in% c("China", "Japan", "South Korea", "Singapore", "India", "United Arab Emirates") ~ "亚洲",
+    dest_country %in% c("Brazil", "Argentina", "Chile", "Colombia") ~ "南美洲",
+    dest_country %in% c("Egypt", "South Africa", "Morocco") ~ "非洲",
+    TRUE ~ "其他"
+  ))
+
+# 按大洲着色的地图
+ggplot() +
+  geom_sf(data = world, fill = "gray10", color = "gray25") +
+  geom_sf(data = routes_sf, 
+          aes(color = continent), 
+          size = 0.7, 
+          alpha = 0.7) +
+  scale_color_viridis(discrete = TRUE, name = "目的地大洲") +
+  geom_point(aes(x = jfk_lon, y = jfk_lat), 
+             color = "red", size = 4, shape = 18) +
+  labs(title = "纽约JFK机场航线网络 - 按大洲分布",
+       subtitle = paste("覆盖", n_distinct(routes_sf$continent), "个大洲")) +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "black"),
+    text = element_text(color = "white"),
+    legend.position = "bottom"
+  )
+```
+
